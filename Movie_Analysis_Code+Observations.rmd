@@ -1,0 +1,1421 @@
+---
+title: "Movie Analysis - All Code and Observations"
+author: "Oren Shapira"
+always_allow_html: yes
+output: 
+  html_document:
+    keep_md: yes
+    toc: true
+    theme: united
+  github_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+# **Summary of Project**
+
+## The Data:
+
+In this project, I analyzed a data set on movies that is publicly available on Kaggle at the link below:
+https://www.kaggle.com/tmdb/tmdb-movie-metadata
+
+The data set contains 4,803 rows of data and 20 columns. It contains information on a wide range of movies such as their title, revenue, budget, average voter rating on IMDB, and many other variables that may be of interest. For purposes of analysis, I had to create several additional columns derived from the source data.
+
+## Purpose?
+
+My primary intent in analysis was to evaluate whether there are any variables that have significant impact on a movie's success. Depending how compelling my findings are, certain variables can be used in the predictive modeling of a movie's success.
+
+The term "success" has many interpretations. The metrics I chose to focus on were profit from ticket sales, and the average voter rating from user reviewes on IMDB.com. 
+
+
+
+# **Data Munging (The Dirty Work)**
+
+
+
+
+```{r}
+movies_file <-read.csv("C:\\Users\\oshapira\\Documents\\GitHub\\Movie_Analysis\\Movie_Analysis_GIT\\Data\\tmdb_5000_movies.csv", stringsAsFactors = FALSE)
+
+library(knitr)
+kable(head(movies_file,3))
+
+```
+
+This movie set data set was in a .csv format. I chose to only focus on a subset of variables from the data, as selected below.
+
+
+```{r}
+submovie_file <-subset(movies_file, select =c("title", "budget", "popularity", "release_date", "revenue", "runtime", "vote_average", "vote_count", "production_countries", "genres"))
+
+```
+
+
+```{r}
+kable(head(submovie_file,3))
+```
+
+As seen in snapshot above, some columns (production_countries and genres) had text stored in JSON format. To extract text in a clean format, I used the jsonlite library. From both of these columns, I extracted the first text string from the entire cell - assuming it would be the most relevent. For example, if one movie had multiple genres listed, I extracted only the first (and presumably, primary) genre listed within the respective field.
+
+
+
+```{r}
+##Convert JSON to text
+library(jsonlite)
+
+myCountry <- function (data) {
+  result <- fromJSON(data)
+  if (length(result) > 0)
+    return (result[1,2])
+  else
+    return (NA)
+}
+
+
+
+mygenre <- function (data) {
+  result <- fromJSON(data)
+  if(length(result) > 0 & length(result) < 5)  
+ # return (cat(result[1,2], result[2,2]))
+   return (result[1,2])
+  
+     else
+  return(NA)
+  }
+
+
+
+genres_clean <- as.data.frame(sapply(submovie_file$genres, mygenre))
+
+
+production_countries_clean <- as.data.frame(sapply(submovie_file$production_countries, myCountry))
+
+##drop original production_countries column and add the new "clean" column to dataframe
+submovies_clean <-cbind(submovie_file, production_countries_clean, genres_clean)
+
+submovies_clean <- within(submovies_clean, rm("production_countries", "genres"))
+
+
+
+##rename column name to "production_countries_clean" and "genres"
+colnames(submovies_clean)[length(submovie_file)] <-"genres_clean"
+colnames(submovies_clean)[length(submovie_file)-1] <-"production_countries_clean"
+
+
+head(submovies_clean)
+
+
+```
+
+Since I would like to analyze movies sorted by year, I added an additional column that converts 'release_date' to a year. I also added a column for 'release_month_year', which will be joined with the Consumer Price Index table later on.
+
+
+```{r}
+#convert 'release_date' column to a date format
+submovies_clean$release_date <- as.Date(submovies_clean$release_date, format = "%Y-%m-%d")
+
+
+#add additional columns for release year and month
+release_year <-format(submovies_clean$release_date, '%Y')
+release_month_year <-format(submovies_clean$release_date, '%m-%Y')
+release_month <-months(submovies_clean$release_date)
+submovie_w_year<-cbind(submovies_clean, release_year, release_month_year, release_month)
+
+kable(head(submovie_w_year))
+
+```
+
+To make the 'budget' and 'release_date' values easier to analyze, they were converted to units of $1 million.
+
+
+```{r}
+submovie_w_year$budget <- submovie_w_year$budget/1000000
+submovie_w_year$revenue <- submovie_w_year$revenue/1000000
+```
+
+Since I wanted to analyze the profit and popularity of both high and low-budget films, I chose to retain records with outlier budget values. However, there appeared to be a significant amount of movie records with revenues of 0, which I believed to be inaccurate. Since I wanted to eliminate records that would incorrectly skew the data, I chose to eliminate records that had a budget or revenue of < $100k. It's possible, but unlikely that movies would have revenue or budget of such a small amount. This removed 1,642 records from the data.
+
+
+```{r}
+#assessing the quartiles of budget and revenue amounts
+summary(submovie_w_year$budget)
+summary(submovie_w_year$revenue)
+
+library(dplyr)
+##excluding records with extremely low budgets and revenues
+submovie_w_year_2 <- filter(submovie_w_year, budget >=0.1 & revenue >=0.1)
+
+
+```
+
+
+```{r}
+#rounding budget and revenues to a rounded 100k
+submovie_w_year_2$budget <-format(round(submovie_w_year_2$budget, 1))
+submovie_w_year_2$budget <- as.numeric(submovie_w_year_2$budget)
+
+submovie_w_year_2$revenue <-format(round(submovie_w_year_2$revenue, 1))
+submovie_w_year_2$revenue <- as.numeric(submovie_w_year_2$revenue)
+
+```
+
+I also added a derived profit column that was calculated as revenue-budget.
+
+```{r}
+##added a profit column, which is derived from budget - revenue
+profit <- submovie_w_year_2$revenue -submovie_w_year_2$budget
+
+```
+
+
+Due to inflation, it can be difficult to compare budget and revenue dollar amounts between newer and older movies. I joined a dataset that contains the Consumer Price Index (CPI) for every month-year since 1947. Each year would then have a CPI index that would be used to created additional columns for normalized budget, revenue, and profit (derived from budget-revenue). Normalized dollar amounts will allow for better comparisons accross release years.
+
+Data source: https://fred.stlouisfed.org/series/CPIAUCSL
+
+
+```{r}
+
+
+
+submovie_w_year_2<-cbind(submovie_w_year_2, profit)
+
+kable(head(submovie_w_year_2))
+```
+
+
+```{r}
+CPI <-read.csv("C:\\Users\\oshapira\\Documents\\GitHub\\Movie_Analysis\\Movie_Analysis_GIT\\Data\\CPIAUCSL.csv", stringsAsFactors = FALSE)
+
+kable(head(CPI))
+```
+
+Adjusted CPI dataframe to include a month/year column that matches the format within the movies dataframe
+
+
+```{r}
+CPI$DATE <-as.Date(CPI$DATE, format = '%Y-%m-%d')
+
+CPI_year <-format(CPI$DATE, "%Y")
+
+```
+
+Added an adj_CPI column that calculates the relative CPI of a given year. Generally speaking, more recent years will have higher adj_CPI values
+
+
+```{r}
+maxcpi <-max(CPI$CPIAUCSL, na.rm = TRUE)
+
+
+adj_CPI <- CPI$CPIAUCSL/maxcpi
+
+CPI_norm <-cbind(CPI, CPI_year,adj_CPI)
+kable(head(CPI_norm))
+```
+
+As calculated below, there were 31 records lost from joining the CPI table (movies that preceded 1947)
+
+
+```{r}
+Movie_Table<-submovie_w_year_2 %>% inner_join(CPI_norm, by = c("release_year" = "CPI_year"))
+
+### Movies lost in inner join if they have a release data prior to CPI table
+nrow(submovie_w_year_2) -nrow(Movie_Table)
+```
+
+Adding budget, revenue, and profit columns that are normalized by CPI
+
+
+```{r}
+norm_budget <-as.numeric(format(round(Movie_Table$budget/Movie_Table$adj_CPI,1)))
+norm_revenue <-as.numeric(format(round(Movie_Table$revenue/Movie_Table$adj_CPI,1)))
+norm_profit <-as.numeric(format(round(Movie_Table$profit/Movie_Table$adj_CPI,1)))
+
+
+
+
+Movie_Table2<-cbind(Movie_Table, norm_budget, norm_revenue, norm_profit)
+
+
+
+kable(head(Movie_Table2))
+```
+
+# **Preliminary Data Visualizations and Analysis (The Fun Part)**
+
+The analysis and visualizations below are for preliminary interpretation of the data. The immediate intention was to spot any interesting trends when comparing a few variables at a time. As I was doing this, I also wanted to gauge whether the dataset should be filtered down at all to minimize outlier data points. Lastly, I was curious to see which variable(s) had the highest correlation to high profits and voter ratings.
+
+
+```{r}
+library(plotly)
+```
+
+Calculated average normalized (per CPI) movie budgets and profits grouped by year. I then converted this to a dataframe that would be visualzed below
+
+
+```{r}
+#budget_by_year<-tapply(Movie_Table$budget, Movie_Table$release_year, mean)
+profit_by_year<-tapply(Movie_Table$profit, Movie_Table$release_year, mean)
+
+
+years <-names(tapply(Movie_Table$budget, Movie_Table$release_year, mean))
+
+norm_profit_by_year<-tapply(Movie_Table2$norm_profit, Movie_Table2$release_year, mean)
+norm_budget_by_year<-tapply(Movie_Table2$norm_budget, Movie_Table2$release_year, mean)
+#data <-data.frame(norm_budget_by_year, budget_by_year, years)
+
+```
+
+I decided that I'd like the focus of my analysis to be on the normalized budget and profits of movies. I wanted to see whether these amounts were impacted by other variables such as release year, month, movie runtime, and other factors.
+
+My first analysis was comparing average movie budgets by release year compared to their normalized budget. 
+
+
+```{r}
+
+data <-data.frame(profit_by_year, norm_profit_by_year, years)
+
+p <- plot_ly(data, x = ~years, y = ~norm_profit_by_year, type = 'bar', name = 'Normalized Profit by Year') %>%
+  add_trace(y = ~profit_by_year, name = 'Raw Profit by Year') %>%
+  layout(xaxis = list(title = 'Release Year'),
+      yaxis = list(title = 'Average Profit (Millions)'), 
+      margin = list(b=80),
+      barmode = 'group')
+  
+p
+
+```
+
+
+```{r}
+Movies_Old <-arrange(filter(Movie_Table2, Movie_Table$release_year < 1980), desc(norm_profit))
+
+```
+
+This bar chart shows very large spikes in normalized profit for older movies prior to 1980. When digging further into the data, it turns out these were driven by high-grossing movies such as Star Wars (1977, ~3 Billion normalized profit). It also turns out that older movies are much lower in proportion. Yearly averages prior to 1990 would more likely be skwered by outlier data points. I was concerned this "noise" would impede my ability to make general conclusions of movie profits over time. Lastly, the amount of bars/years in the chart above make the visualization (and likely subsequent ones) hard to digest. 
+
+
+It's a general rule of thumb in statistics that a sample size of 30 is considered large enough so that the distribution of values will follow a somewhat normal bell curve. Therefore, I chose to filter out years that had > 30 movies from my analysis. This ended up removing all years from 1947-1992, but only excluding 441 records.
+
+
+```{r}
+df.movies_by_year <-as.data.frame(table(Movie_Table2$release_year))
+
+year_filter <-dplyr::filter(df.movies_by_year, df.movies_by_year$Freq  > 30 )
+
+Movie_Table3 <- Movie_Table2[Movie_Table2$release_year %in% year_filter$Var1,]
+
+rows_dropped <-nrow(Movie_Table2) - nrow(Movie_Table3)
+```
+
+
+
+```{r}
+
+norm_profit_by_year_2<-tapply(Movie_Table3$norm_profit, Movie_Table3$release_year, mean, na.rm = TRUE)
+
+profit_by_year_2<-tapply(Movie_Table3$profit, Movie_Table3$release_year, mean, na.rm = TRUE)
+
+years2 <-names(tapply(Movie_Table3$profit, Movie_Table3$release_year, mean))
+
+data2 <-data.frame(norm_profit_by_year_2, profit_by_year_2, years2)
+
+p2 <- plot_ly(data2, x = ~years2, y = ~profit_by_year_2, type = 'bar', name = 'Raw Profit') %>%
+  add_trace(y = ~norm_profit_by_year_2, name = 'Normalized Profit') %>%
+  layout(title = "Average Profit (Millions)", yaxis = list(title = 'Average Profit (Millions) By Year'), xaxis = list(title ='Year'), margin = list(b=80), barmode = 'group')
+
+
+p2
+
+```
+
+When filtering down on more recent movies, the average normalized and raw profits per year seemed much more evenly distributed by year. However, I did noticed that 90s movies had particularly high average normalized profits. I was concerned that the CPI normalization I used was "over-normalizing" the profit dollars and causing 90s movies to appear more profitable (by today's standards) than they actually were at the time.
+
+To validate whether the CPI normalization for dollars I used seemed reasonable, I made a similar bar plot of average raw vs. normalized budgets in the same time span. The distribution of normalized budget by year was much more evenly distributed. Therefore, I felt confident enough to continue using the normalized profit and budget values that I derived.
+
+
+```{r}
+norm_budget_by_year_2<-tapply(Movie_Table3$norm_budget, Movie_Table3$release_year, mean, na.rm = TRUE)
+
+budget_by_year_2<-tapply(Movie_Table3$budget, Movie_Table3$release_year, mean, na.rm = TRUE)
+
+years2 <-names(tapply(Movie_Table3$budget, Movie_Table3$release_year, mean))
+
+data2 <-data.frame(norm_budget_by_year_2, budget_by_year_2, years2)
+
+p2 <- plot_ly(data2, x = ~years2, y = ~budget_by_year_2, type = 'bar', name = 'Raw Budget') %>%
+  add_trace(y = ~norm_budget_by_year_2, name = 'Normalized Budget') %>%
+  layout(title = "Average Budget (Millions)", yaxis = list(title = 'Average Budget (Millions) By Year'), xaxis = list(title ='Year'), margin = list(b=80), barmode = 'group')
+
+
+p2
+```
+
+The Box and Whiskers plot below is another way to visualize the average budget normalized budgets by year. This plot type additionally shows the quartile summaries and outlier data points by year. It appears that each release year had at least a few outliers. Years 2005-2015 particularly seemed to have an increasing amount of outlier "big budget" films
+
+
+```{r}
+whisker.norm_budget <- plot_ly(Movie_Table3, x = ~norm_budget, color = ~release_year, type = "box") %>%
+layout(title = "Normalized Budget: Box and Whiskers",
+      xaxis = list(title = 'Normalized Budget'),
+      yaxis = list(title = 'Release Year'))
+
+
+whisker.norm_budget
+
+```
+
+
+
+
+The scatter plot below adds an additional variable dimension (bubble size and color) that is based on the normalized profit of a movie. The data points are plotted on an axis of release year vs. normalized buget. 
+
+
+
+```{r}
+
+Movie_Table_4 <- filter(Movie_Table3, Movie_Table3$vote_count > 30)
+
+scatter.profit.budget <-plot_ly(Movie_Table_4, x = ~release_year, y = ~norm_budget, size = ~norm_profit, color = ~norm_profit, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+    text = ~paste('</br>',title,
+        '</br> Profit: ', norm_profit,
+        '</br> Budget: ', norm_budget,
+        '</br> Rating: ', vote_average))%>%
+  layout(title = "Average Voter Rating by Year and Normalized Budget",
+        xaxis = list(title = "Release Year"),
+        yaxis = list(title = "Normalized Budget"),
+        margin = list(b=80))
+
+scatter.profit.budget
+
+
+```
+
+The plot below is similar, expect that bubble size and color is based on the average voter rating. I filtered out movies that had < 30 total votes for the average voter rating.
+
+
+```{r}
+
+
+
+scatter.year.rating2 <-plot_ly(Movie_Table_4, x = ~release_year, y = ~norm_budget, size = ~vote_average, color = ~vote_average, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+    text = ~paste('</br>',title,
+        '</br> Profit: ', norm_profit,
+        '</br> Budget: ', norm_budget,
+        '</br> Rating: ', vote_average))%>%
+  layout(title = "Average Voter Rating by Year and Normalized Budget",
+        xaxis = list(title = "Release Year"),
+        yaxis = list(title = "Normalized Budget"),
+        margin = list(b=80))
+
+scatter.year.rating2
+
+```
+
+
+The scatter plot below replaces the release year x-axis with average voter rating. Based on this plot, it doesn't seem like there is much correlation with voter rating and normalized budget per movie. This will be explored in more detail later on.
+
+
+
+```{r}
+scatter.profit.budget.rating <-plot_ly(Movie_Table_4, x = ~vote_average, y = ~norm_budget, size = ~norm_profit, color = ~norm_profit, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+    text = ~paste('</br>',title,
+        '</br> Profit: ', norm_profit,
+        '</br> Budget: ', norm_budget,
+        '</br> Rating: ', vote_average,
+        '</br> Release Year: ', release_year))%>%
+  layout(title = "Voter Rating vs. Normalized Budget and Profit",
+        xaxis = list(title = "Average Voter Rating"),
+        yaxis = list(title = "Normalized Budget"),
+        margin = list(b=80))
+
+scatter.profit.budget.rating
+
+```
+
+
+
+
+
+
+# **Additional Visualizations and Statistical Analysis (The Important Part)**
+##Linear Regression Modeling
+
+Much of my analysis below is driven by my original question of "What makes a movie successful". The two key metrics I've chosen to measure success are normalized profit, and average voter rating.
+
+
+
+The correlation matrix below helps highlight which variables have the highest correlation to profit and voter rating.
+
+
+
+```{r}
+
+#colnames(Movie_Table_4)
+
+
+#head(Movie_Table_4[,c(6:8, 10, 13, 18:20)])
+
+library(GGally)
+
+#pairs_numeric <- Movie_Table_4[,c(6:8, 18:20)]
+pairs_numeric2 <- Movie_Table_4[,c(6:7, 18,20)]
+
+#pairs_all <- Movie_Table_4[,c(6:8, 10, 13, 18:20)]
+
+
+#ggpairs(pairs_numeric, cardinality_threshold = 20)
+
+ggpairs(pairs_numeric2, cardinality_threshold = 20)
+
+
+
+```
+
+
+It appears that average voter rating, movie runtime, and particularly normalized budget have some correlation to normalized profit. Therefore, I decided to create a linear model that projects the impact of these combined variables on normalized profit.
+
+###Multivariable Linear Regression for Movie Profit
+
+For reference, the standard equation for a linear regression model is Y-intercept value + Slope of Line(variable1)+ Slope(variable2).... + Standard Error =Beta0 + Beta1(x1) + Beta1(x2).....+ E
+
+
+```{r}
+model <- lm(Movie_Table_4$norm_profit~Movie_Table_4$norm_budget +Movie_Table_4$runtime +Movie_Table_4$vote_average)
+
+```
+
+The linear model fitted with these variables would be -396.6 + 2.01(norm_budget) + -0.27(runtime) + 66.6(vote_average).
+
+Right away, I can see that the runtime variable has a contradictary negative slope, which leads me to believe it may not be worth including in a linear model for projecting profit
+
+
+
+To prove whether these correlations are statistically significant and can be assumed true for all movies (not just this sample), I applied a formal 5-step hypothesis test outlined below. The linear model I was testing was for whether the combination of normalized budget, voter average, and runtime had a linear correlation with normalized profit.
+
+
+
+Step 1: Set up hypothesis and select alpha level
+
+Null hypothesis: The slope (Beta1) = 0, and there is no linear association at alpha = 0.99
+Alternative hypothesis: The slope (Beta1) does not equal 0, and there is a linear association at alpha = 0.99
+
+
+Step 2. Select appropriate test statistic
+
+I will be using the Fisher test, and will calculate the F-statistic for 3 and 2577 degrees of freedom
+
+
+Step 3. State the decision rule for accepting/rejecting null hypothesis
+
+In a standard F-distribution model with 3, 2577 degrees of freedom and alpha 0.99, F = 3.79 (calculation below)
+If the F-statistic calculated from my model is > than 3.79, I will reject the null hypothesis. If < than 3.79, I will not reject it.
+
+```{r}
+qf(.99, df1 = 3, df2 = 2577)
+```
+
+
+Step 4. Calculate F-statistic (below)
+As seen from the model of my summary, the F-statistic is 467.8.  
+
+```{r}
+attach(Movie_Table_4)
+
+summary(model)
+```
+
+Step 5. Conclusion
+
+Since is 467.8 is much larger than 3.79. Therefore, I will reject the null hypothesis that there is no linear association with the budget, runtime, and voter average variables combined. You can reach the same conclusion by referring to the p-value (2.2e-16), which is much smaller than the p-value of 0.01 in the F-distribution (1-alpha 0.99).
+
+
+Secondary conclusion: Since I can see that the p-value for runtime (0.15) is > 0.01, I don't think it makes sense to keep it in the linear regression model. This also explains why it had a negative slope in the model calculated above. When choosing variables for a regression model, it's also important that the variables included are independent as possible. As seen by the calculated correlation coefficients below, runtime has some correlation to both voter average and budget. Voter average and budget, however, do not have a correlation to each other. Therefore they are more ideal to use within the model.
+
+```{r}
+cor(Movie_Table_4$vote_average,Movie_Table_4$runtime)
+cor(Movie_Table_4$norm_budget,Movie_Table_4$runtime)
+cor(Movie_Table_4$norm_budget,Movie_Table_4$vote_average)
+
+
+```
+
+
+
+The new linear regression model I've calculated below only includes budget and voter average as predictors of profit. Updated model is now:
+-408.4 + 1.98(norm_budget) + 64.03(vote_average). A 3D plot for this is below.
+
+```{r}
+model2 <- lm(Movie_Table_4$norm_profit~Movie_Table_4$norm_budget +Movie_Table_4$vote_average)
+model2
+```
+
+
+```{r}
+library(rgl)
+plot3d(Movie_Table_4$vote_average, Movie_Table_4$norm_budget, Movie_Table_4$norm_profit, xlab = "Vote Average", ylab = "Budget", zlab = "Profit")
+scatterplot3d::scatterplot3d(Movie_Table_4$vote_average, Movie_Table_4$norm_budget, Movie_Table_4$norm_profit)
+
+```
+
+
+If I were to run the same formal hypothesis testing on this updated model, it would prove that there is a statistically significant linear association with these variables compared to profit (rejecting the null hypthoses that Beta1 = 0). 
+
+However, it's important to note that this updated model is still likely not a good predictor for movie profit. Because the R-squared value is 0.35, it means that only 35% of the variability in profit can be explained from this model. Most people would not trust a model with such a low precision level.
+
+
+```{r}
+summary(model2)
+```
+
+
+Before we decide against using this linear model, I wanted to see whether the significance of it (proven in F-test) can be attributed to both or just one of these variables. This is determined by separately running a t-test on both the budget and voter average variables.
+
+
+
+When running t-tests on each variable, I'm essentially testing the "fit" of a linear model for one variable at a time. Similar to the F-test, I used a 5-step formal test method. 
+
+
+The first one I ran was for normalized budget
+
+
+Step 1: Set up hypothesis and select alpha level
+
+Null hypothesis: The slope (Beta1) = 0, and there is no linear association at alpha = 0.99
+Alternative hypothesis: The slope (Beta1) does not equal 0, and there is a linear association at alpha = 0.99
+
+
+Step 2. Select appropriate test statistic
+
+I will be using the T-test, and will calculate the T-statistic for 2579 degrees of freedom
+
+
+Step 3. State the decision rule for accepting/rejecting null hypothesis
+
+In a standard F-distribution model with 2579 degrees of freedom and alpha 0.99, T = 2.578 (calculation below)
+If the T-statistic calculated from my model is > than 2.578, I will reject the null hypothesis. If < than 2.578, I will not reject it.
+
+```{r}
+
+#must use (1-((1-alpha)/2) within a T-distribution
+qt(0.995, df = 2577)
+
+```
+
+
+Step 4. Calculate T-statistic (below)
+As seen from the model of my summary, the T-statistic is 31.96  
+
+```{r}
+model_budget <- lm(Movie_Table_4$norm_profit~Movie_Table_4$norm_budget)
+summary_model_budget <- summary(model_budget)
+summary_model_budget
+
+confint(model_budget, level = 0.99)
+```
+
+Step 5. Conclusion
+
+Since is 31.96 > 2.578. Therefore, I will reject the null hypothesis that there is no linear association with budget and profit. You can reach the same conclusion by referring to the p-value (2.2e-16), which is much smaller than the p-value of 0.005 in the T-distribution.
+
+
+
+
+
+
+```{r}
+model_budget
+confint(model_budget, level = 0.99)
+```
+
+The linear regression equation for this model is: -6.82 + 1.98x. 
+The 99% confidence interval for the slope is 1.98 +/- 2.577*0.0619 (1.82, 2.14). The model is plotted against the scatter plot of datapoints below.
+
+
+
+
+```{r}
+plot_budget <- plot_ly(Movie_Table_4, x = ~norm_budget, y = ~norm_profit, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+  text = ~paste('</br>',title,
+    '</br> Profit: ', norm_profit,
+    '</br> Budget: ', norm_budget))%>%
+ layout(
+    title = "Normalized Movie Budget vs. Profit",
+      xaxis = list(title = ~paste('Budget:', round(summary_model_budget$coefficients[1], digits = 2), " + ", round(summary_model_budget$coefficients[2], digits = 2), "* Budget")),
+      yaxis = list(title = "Movie Profit"), showlegend = FALSE) %>%
+
+add_lines(x = ~norm_budget, y = fitted(model_budget))
+  
+plot_budget              
+
+```
+###Regression Diagnostics for Budget vs. Movie Profit
+
+
+Now that a linear regression model for budget vs. profit has been calculated and proven statistically significant, we will run some regression diagnostics to identify any data outliers that may have distorted the model. 
+
+
+For every model, we expect some residual error. This refers to how far the actual data points vary from the expected predicted value from a linear model. When evaluating the residual errors, two key things to look for are:
+
+1. Is the degree of residual error constant across the entire regression line? To rephrase this differently, is the variation of the response variable (profit) consistent around the regression line?
+
+2. Are the residuals around the regression line normally distributed?
+
+
+```{r}
+plot_budget_resid2 <- plot_ly(Movie_Table_4, x = ~norm_budget, y = ~resid(model2), type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+  text = ~paste('</br>',title,
+    '</br> Profit: ', norm_profit,
+    '</br> Budget: ', norm_budget))%>%
+ layout(
+    title = "Residuals: Normalized Movie Budget vs. Profit",
+      xaxis = list(title ="Non-Fitted Budget Values"),
+      yaxis = list(title = "Residual"), showlegend = FALSE)  %>%
+add_lines(x = 0)
+  
+plot_budget_resid2   
+```
+
+As seen above, the residual points are very inconsistent around the regression line. The vast majority of movies with budgets < 150 million have increasingly negative residuals. Even if the residuals were constant, there are also numerous outlier points (particularly for high-budget movies) that likely have strong influence on the regression model. A regression model would have to be re-run with these data points removed. Another option would be to run a regression model limited to only movies in the 150-250 million dollar range. The residuals look more constant there.
+
+
+I additionally looked to see whether there was a normal distribution of the residuals. With the exception of the outlier points, the overall distribution looks normal. However, looking at this plot alone wouldn't illustrate whether the distribution of positive/negative residuals is constant throughout the entire regression line.
+
+
+```{r}
+
+plot_budget_hist_resid <- plot_ly(x = ~resid(model2), type = 'histogram')
+plot_budget_hist_resid
+
+#Additional visual for plotting Residuals:
+#Fitted values
+
+# plot_budget_resid <- plot_ly(Movie_Table_4, x = ~fitted(model_budget), y = ~resid(model_budget), type = "scatter", mode = 'markers',
+# hoverinfo = 'text',
+#   text = ~paste('</br>',title,
+#     '</br> Profit: ', norm_profit,
+#     '</br> Budget: ', norm_budget))%>%
+#  layout(
+#     title = "Residuals: Normalized Movie Budget vs. Profit",
+#       xaxis = list(title ="Model-Fitted Values"),
+#       yaxis = list(title = "Residual"), showlegend = FALSE)  %>%
+# add_lines(x = 0)
+#   
+# plot_budget_resid   
+
+#cook's distance of residuals
+
+# library(car)
+# 
+# influencePlot(model_budget)
+# 
+# cooks.distance(model_budget)
+# 
+# influence.measures(model_budget)
+
+```
+
+
+For the sake of having constant residuals and removing outliers, I considered recalculating a linear regression model for only movie budgets between 150-250 million and less than 1 billion in profit, which resulted in the plot below.
+
+```{r}
+
+Movie_Table_4_rmoutlier_budget <-filter(Movie_Table_4, norm_budget <250 & norm_budget >100 & norm_profit <1000)
+
+model_budget_rmoutlier <- lm(Movie_Table_4_rmoutlier_budget$norm_profit~Movie_Table_4_rmoutlier_budget$norm_budget)
+summary_model_budget_rmoutlier <- summary(model_budget_rmoutlier)
+
+
+plot_budget2 <- plot_ly(Movie_Table_4_rmoutlier_budget, x = ~Movie_Table_4_rmoutlier_budget$norm_budget, y = ~Movie_Table_4_rmoutlier_budget$norm_profit, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+text = ~paste('</br>',title,
+     '</br> Profit: ', norm_profit,
+     '</br> Budget: ', norm_budget))%>%
+   layout(
+     title = "Adjusted model: Normalized Movie Budget vs. Profit",
+       xaxis = list(title = ~paste('Budget:', round(summary_model_budget_rmoutlier$coefficients[1], digits = 2), " + ", round(summary_model_budget_rmoutlier$coefficients[2], digits = 2), "* Budget")),
+       yaxis = list(title = "Movie Profit"), showlegend = FALSE) %>%
+
+ add_lines(x = ~norm_budget, y = fitted(model_budget_rmoutlier))
+
+plot_budget2  
+```
+
+
+
+
+
+Even when filtering on this range of data points, you can see that a linear regression model is not a good fit. Too many of the data points have a high residual and are far from the regression line. The R-squared coefficient is extremely low at 0.14. 
+
+
+
+
+Now that I've assessed normalized budget as a standalone variable for predicting normalized profit, I did the same type of analysis for average voter rating as a predictor of profit. The model for this is -293.1 + 63.7(voter rating)
+The standard error (at 99% confidence) for the slope = 2.56 +/- 2.577*4.656 Confidence Interval(51.66, 75.66)
+
+```{r}
+model_vote_average <- lm(Movie_Table_4$norm_profit~Movie_Table_4$vote_average)
+confint(model_vote_average, level = 0.99)
+```
+The linear model compared to the scatter plot is seen below.
+
+
+```{r}
+qt(0.995, df = 2577)
+
+summary_model_vote_average <- summary(model_vote_average)
+summary_model_vote_average
+
+```
+
+
+```{r}
+plot_vote_average <- plot_ly(Movie_Table_4, x = ~vote_average, y = ~norm_profit, type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+  text = ~paste('</br>',title,
+    '</br> Profit: ', norm_profit,
+    '</br> vote_average: ', vote_average))%>%
+ layout(
+    title = "Normalized Movie vote_average vs. Profit",
+      xaxis = list(title = ~paste('vote_average:', round(summary_model_vote_average$coefficients[1], digits = 2), " + ", round(summary_model_vote_average$coefficients[2], digits = 2), "* vote_average")),
+      yaxis = list(title = "Movie Profit"), showlegend = FALSE) %>%
+
+add_lines(x = ~vote_average, y = fitted(model_vote_average))
+  
+plot_vote_average   
+```
+
+
+I used the same T-test as performed on movie budget to determine whether the linear model is statistically significant.
+
+
+
+
+
+The T-value for this model (13.67) > than the critical value of a T-distribution with 1, 2579 degrees of freedom (2.577). Therefore, we can reject the null hytpothesis that there the slope for this regression model = 0.
+
+Despite this, I can see that the R-squared value for this model is very low (0.068). Therefore it could only be used to predict ~7% of the variablility in profits. 
+
+
+To further disprove the value of including voter average within the linear model, I did the same type of regression diagnostics that was performed for bugets. 
+
+
+
+
+
+The residual plot below shows that the majority of data points have a positive residual compared to the model. This means that many of the data points in this sample have higher profits than what would be predicted from just using the linear model.
+
+
+```{r}
+plot_vote_average_resid2 <- plot_ly(Movie_Table_4, x = ~vote_average, y = ~resid(model_vote_average), type = "scatter", mode = 'markers',
+hoverinfo = 'text',
+  text = ~paste('</br>',title,
+    '</br> Profit: ', norm_profit,
+    '</br> vote_average: ', vote_average))%>%
+ layout(
+    title = "Residuals: Movie vote_average vs. Profit",
+      xaxis = list(title ="Non-Fitted vote_average Values"),
+      yaxis = list(title = "Residual"), showlegend = FALSE)  %>%
+add_lines(x = 0)
+  
+plot_vote_average_resid2   
+
+
+
+
+
+
+
+```
+
+The histogram of residuals further validates this point. You can see that it's skewed very far right for residiuals > 0
+
+
+```{r}
+plot_vote_average_hist_resid <- plot_ly(x = ~resid(model_vote_average), type = 'histogram')
+plot_vote_average_hist_resid
+
+```
+
+
+
+
+In conclusion, the normalized budget, voter rating, and movie runtime do not appear to be strong predictors of normalized profit when applying a linear regression model. Applying a regression model would result have a large margin of error in predicting profit. 
+
+
+
+
+
+
+
+
+##ANOVA and ANCOVA Testing for Movie Release Month and Genre
+
+
+###ANCOVA of Release Month
+
+
+In addition to performing linear regression testing on the numeric variables (runtime, budget, voter rating), I was curious whether there were any categorical non-numeric variables that had an impact on normalized profit. The first one that I chose to analyze was the month of the year when a movie was released.
+
+
+To see whether there is a seasonal impact on the profit of a movie, I altered my dataset to average movie profits by month of year. My hypothesis was that summer movies would have higher profits, since more people are likely to go out and see movies in the summertime. 
+
+
+```{r}
+
+norm_budget_by_month<-tapply(Movie_Table_4$norm_budget, Movie_Table_4$release_month, mean, na.rm = TRUE)
+norm_profit_by_month<-tapply(Movie_Table_4$norm_profit, Movie_Table_4$release_month, mean, na.rm = TRUE)
+
+release_month <-names(tapply(Movie_Table_4$norm_budget, Movie_Table_4$release_month, mean))
+
+
+data <-data.frame(norm_profit_by_month, norm_budget_by_month, release_month)
+
+```
+
+The first graphic I created to analyze this was a boxplot. Due to all of the outlier data points (high buget movies), it was a little hard to interpret this chart. While it did appear that summer movies (as expected) had higher profits, I suspected that this was due to other confounding variables such as budget.
+
+
+
+```{r}
+
+xform <- list(categoryorder = "array",
+              categoryarray = c("January" 
+                                ,"February"
+                                ,"March"
+                                ,"April"
+                                ,"May"
+                                ,"June"
+                                ,"July"
+                                ,"August"
+                                ,"September"
+                                ,"October"
+                                ,"November"
+                                ,"December"))
+
+attach(Movie_Table_4)
+whisker.profit_month <- plot_ly(Movie_Table_4, x = ~norm_profit, color = ~release_month, type = "box") %>%
+layout(title = "Normalized Profit by Release Month: Box and Whiskers",
+      xaxis = list(title = 'Normalized Profit'),
+      yaxis = c(xform, list(title = 'Release Month')),
+      showlegend = FALSE,
+      margin = list(l=80))
+    
+
+
+whisker.profit_month
+
+```
+
+
+The barchart below groups in the variable of budget. While summer movies did have higher profits, they did also have higher budgets. This is not surprising, since my regression analysis performed above proved that there is some correlation between higher-budget movies having larger profits. In order to accurately assess whether certain release months are associated with higher profits, while also surpressing the impact of other variables, we must perform a statistical ANCOVA test.
+
+
+
+```{r}
+
+
+
+
+p2 <-plot_ly(data, x = ~release_month, y = ~norm_profit_by_month, type = "bar", name = 'Normalized Profit by Month')%>%
+add_trace(y = ~norm_budget_by_month, name = 'Normalized Budget by Month') %>%
+layout(title = 'Average Profit and Budget by Month',
+    xaxis = c(xform, list(title = 'Month')),
+yaxis = list(title = 'Average Normalized Budget by Month (Millions)'), margin = list(b=80), barmode = 'group')
+
+
+p2
+
+
+
+
+```
+
+
+
+The first test of ANOVA I performed was comparing the difference in profit between months when accounting for all other numeric variables (budget, runtime, and voter average). This will ensure that the difference in profits by month isn't impacted by these confounding variables.
+
+```{r}
+library(car)
+
+anova_month_all_numeric <-Anova(lm(Movie_Table_4$norm_profit~Movie_Table_4$release_month + Movie_Table_4$norm_budget + Movie_Table_4$runtime + Movie_Table_4$vote_average), type = 3)
+
+anova_month_all_numeric
+pairwise_month <-pairwise.t.test(Movie_Table_4$norm_profit,Movie_Table_4$release_month, p.adj = "bonferroni")
+
+
+```
+
+
+When performing ANOVA at an alpha level of 0.95, the results from this ANOVA show that budget and voter average have a very low p-value, and therefore have statisitical signifance on the difference in profit by month. The variable runtim has a high p-value (> 0.05), and therefore does not have a significant impact. These findings align with the regression modeling that I previously ran.
+
+I reran an ANCOVA test that only included accounting for the budget and voter average variables
+
+
+```{r}
+anova_month_budget_vote <-Anova(lm(Movie_Table_4$norm_profit~Movie_Table_4$release_month + Movie_Table_4$norm_budget + Movie_Table_4$vote_average), type = 3)
+
+anova_month_budget_vote
+
+qf(.95, df1 = 11, df2 = 2567)
+
+
+```
+
+This ANCOVA test proves that there is a statistically significant difference in mean profits across all different release months (F-value of 3.25 > F critical value of 1.79). This means that at least two of the months within this analysis have a significant difference between each other in profit when controlled for confounding variables. I continued to calculate the least-squares means for the normalized profits by release month. I visualized the findings below.
+
+
+```{r}
+anova_month_budget <-Anova(lm(Movie_Table_4$norm_profit~Movie_Table_4$release_month + Movie_Table_4$norm_budget), type = 3)
+
+
+
+library(lsmeans)
+
+
+lsmeans_month_budget_vote <- lsmeans(lm(Movie_Table_4$norm_profit~Movie_Table_4$release_month + Movie_Table_4$norm_budget + Movie_Table_4$vote_average), pairwise~Movie_Table_4$release_month, adjust = "bonferroni")
+
+
+##comparing the contrasts between each month
+summary_lsmeans_month_budget_vote <- summary(lsmeans_month_budget_vote$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+summary_lsmeans_month_budget_vote_lsmean <-summary(lsmeans_month_budget_vote$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+
+
+
+ggplot(summary_lsmeans_month_budget_vote_lsmean, aes(summary_lsmeans_month_budget_vote_lsmean$`Movie_Table_4$release_month`
+)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Month", y = "LS Mean - Normalized Profit", title = "LS Mean Profit by Month (Controlling for Budget and Vote Average)") +
+  theme_classic() +
+  scale_x_discrete(limits = c("January" 
+                                ,"February"
+                                ,"March"
+                                ,"April"
+                                ,"May"
+                                ,"June"
+                                ,"July"
+                                ,"August"
+                                ,"September"
+                                ,"October"
+                                ,"November"
+                                ,"December"))
+
+```
+
+
+The plot above compares the least-squares means (indicated by the blue dots) between normalized movie profits when controlling for the confounding variables normalized budget and voter average. Based on the this sample of data, the mean profit of some months (like June-August) were higher than others (November-December) - even if the movies within those months had the same exact budget and voter rating. The tick marks near the blue dots reflect the 95% confidence interval for the mean normalized profit.
+
+
+
+
+```{r}
+
+lsmeans_month_budget <- lsmeans(lm(Movie_Table_4$norm_profit~Movie_Table_4$release_month + Movie_Table_4$norm_budget), pairwise~Movie_Table_4$release_month, adjust = "bonferroni")
+
+
+##comparing the contrasts between each month
+summary_lsmeans_month_budget <- summary(lsmeans_month_budget$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+summary_lsmeans_month_budget_lsmean <-summary(lsmeans_month_budget$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+
+
+
+ggplot(summary_lsmeans_month_budget_lsmean, aes(summary_lsmeans_month_budget_lsmean$`Movie_Table_4$release_month`
+)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Month", y = "LS Mean - Normalized Profit", title = "LS Mean Profit by Month (Controlling for only Budget)") +
+  theme_classic() +
+  scale_x_discrete(limits = c("January" 
+                                ,"February"
+                                ,"March"
+                                ,"April"
+                                ,"May"
+                                ,"June"
+                                ,"July"
+                                ,"August"
+                                ,"September"
+                                ,"October"
+                                ,"November"
+                                ,"December"))
+
+```
+
+I additionally plotted the LS means for profit when only accounting for the movie budget variable. This plot produced similar results.
+
+
+
+These results were somewhat surprising for several reasons.
+
+1. August shows the highest LS mean. I was expecting June/July to have the highest LS means, since movie studios typically release their big blockbuster movies at the beginning of summer. However these same blockbusters do tend to have higher budgets, which would reduce it's LS mean value. As seen from the initial bar chart above, the average budget for movies in August is much lower than June/July (explaining the higher LS mean value). One could inference that many people are still willing to see movies released in August (perhaps a final rush before school starts).
+
+2. November/December have surprisingly low LS mean profits.  The Golden Globes and Academy Awards (held in Januay and March, respectively) require that a movie is released prior the January 1st to be eligible for nomination. For that reason, movie studios typically try to release their most critically-acclaimed movies in late winter while it would still be fresh in viewers' minds for the upcoming "Awards season". Though these "critically-acclaimed" movies aren't necessarily high profit, I was expecting these months to have higher LS means than other winter/early spring months. The relatively high budgets of movies in November/December, paired with the fact that people don't go out as much in the winter, is likely the culprit for the low LS mean values.
+
+
+
+
+```{r}
+
+anova_month_budget_vote2 <-Anova(lm(Movie_Table_4$vote_average~Movie_Table_4$release_month + Movie_Table_4$norm_budget), type = 3)
+
+
+qf(.95, df1 = 11, df2 = 2567)
+
+lsmeans_month_budget_vote2 <- lsmeans(lm(Movie_Table_4$vote_average~Movie_Table_4$release_month + Movie_Table_4$norm_budget), pairwise~Movie_Table_4$release_month, adjust = "none")
+
+
+##comparing the contrasts between each month
+summary_lsmeans_month_budget_vote2 <- summary(lsmeans_month_budget_vote2$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+summary_lsmeans_month_budget_vote_lsmean2 <-summary(lsmeans_month_budget_vote2$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+ggplot(summary_lsmeans_month_budget_vote_lsmean2, aes(summary_lsmeans_month_budget_vote_lsmean2$`Movie_Table_4$release_month`
+)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Month", y = "LS Mean -Voter Rating", title = "LS Mean Rating by Month (Controlling for Budget and Release Month)") +
+  theme_classic() +
+  scale_x_discrete(limits = c("January" 
+                                ,"February"
+                                ,"March"
+                                ,"April"
+                                ,"May"
+                                ,"June"
+                                ,"July"
+                                ,"August"
+                                ,"September"
+                                ,"October"
+                                ,"November"
+                                ,"December"))
+```
+
+
+For movie studios focused on critic/user reviews more than profit, I was also curious to plot the LS means for voter average when controlling for budget. The plot above shows that December does have a relatively high LS mean average rating (due to movies released for "Awards season"). However I was surprised that December voter ratings were not any higher than certain late Spring and Summer months. Perhaps people rate movies higher in the summer when they're in a better mood? Or perhaps the movies released in winter are not necessarily better (with maybe exception of a select few nominees). 
+
+
+
+In theory, one could apply this model for predictive purposes about the optimal month to release a movie. However, one should be cognizant that outliers may have a significant impact on these results. There also may be other categorical variables that have an impact on profit. I was curious to see whether movie genre had any impact on certain specific months of the year. More on this below.
+
+
+
+
+###ANOVA of Genres:
+
+
+To see whether movie genre had an impact on normalized movie profit and average voter rating, I produced box and whiskers plots for some preliminary analysis. These plots were a bit difficult to evaluate because there were many outliers. 
+
+*One main caveat of my genre analysis is that I only extracted the first listed genre for each movie. If a movie had multiple listed genres, only the first one was extracted with the assumption that this represents the main genre classification.
+
+
+```{r}
+attach(Movie_Table_4)
+whisker.profit_genre <- plot_ly(Movie_Table_4, x = ~norm_profit, color = ~genres_clean, type = "box") %>%
+layout(title = "Normalized Profit by Genre: Box and Whiskers",
+      xaxis = list(title = 'Normalized Profit'),
+      yaxis = list(title = 'Genre'))
+
+
+whisker.profit_genre
+
+
+whisker.rating_genre <- plot_ly(Movie_Table_4, x = ~vote_average, color = ~genres_clean, type = "box") %>%
+layout(title = "Average Rating by Genre: Box and Whiskers",
+      xaxis = list(title = 'Average Rating'),
+      # yaxis = list(title = 'Genre'),
+      margin = list(l=100))
+
+
+whisker.rating_genre
+
+```
+
+
+
+As an alternative visual, I generated the bar chart below that compares average profit and budget for each genre. I filtered on genres with >30 movies represented in the sample. 
+
+In this chart, it's easier to see that certain genres (e.g. Adventure, Animation, Family, Sci-Fi) experience higher profits on average.These same genres also typically have higher budgets.
+
+
+
+```{r}
+
+library(tidyr)
+
+
+genres_sub <-names(tapply(Movie_Table_4$norm_budget, Movie_Table_4$genres_clean, mean))
+
+genres_sub <- as.data.frame(sort(table(Movie_Table_4$genres_clean)))
+genres_sub <- filter(genres_sub, Freq >30) %>% drop_na()
+
+
+
+Movie_Table_4_genre <- filter(Movie_Table_4, genres_clean == 'Drama' | genres_clean == 'Comedy' | genres_clean == 'Action' | genres_clean == 'Adventure' | genres_clean == 'Horror' | genres_clean == 'Crime' | genres_clean == 'Thriller' | genres_clean == 'Animation' | genres_clean == 'Fantasy' | genres_clean == 'Romance' | genres_clean == 'Science Fiction' | genres_clean == 'Family')
+
+
+
+
+norm_profit_by_genre<-aggregate(Movie_Table_4_genre$norm_profit~Movie_Table_4_genre$genres_clean, FUN = mean)
+colnames(norm_profit_by_genre) <- c("Genre", "Profit")
+
+norm_budget_by_genre<-aggregate(Movie_Table_4_genre$norm_budget~Movie_Table_4_genre$genres_clean, FUN = mean)
+colnames(norm_budget_by_genre) <- c("Genre", "Budget")
+
+
+profit_by_genre <-data.frame(norm_profit_by_genre, norm_budget_by_genre) 
+profit_by_genre <- droplevels(profit_by_genre)
+
+
+
+p_genres <-plot_ly(profit_by_genre, x = ~Genre, y = ~Profit, type = "bar", name = 'Normalized Profit by Genre')%>%
+add_trace(y = ~Budget, name = 'Normalized Budget by Genre') %>%
+layout(title = 'Average Profit and Budget by Genre',
+#    xaxis = c(xform, list(title = 'Month')),
+yaxis = list(title = 'Average Normalized Budget by Genres (Millions)'), margin = list(b=80), barmode = 'group')
+
+
+p_genres
+
+```
+
+
+Now that I've gotten a sense for the data categorized by genre, I performed a one-way ANCOVA - similar to what was done for analyzing release months. Before I reassessed the impact of release month on profit when controlling for movie genre, I first actually wanted to prove whether there was statistically significant difference between the mean profits of different genres.
+
+
+
+
+```{r}
+anova_genre_budget_vote <-Anova(lm(Movie_Table_4_genre$norm_profit~Movie_Table_4_genre$genres_clean + Movie_Table_4_genre$norm_budget + Movie_Table_4_genre$vote_average), type = 3)
+
+F_critical <- qf(.95, df1 = 11, df2 = 2561)
+
+```
+
+Running the F test above proves that there is a difference between normalized profits for each genre when controlling for budget and voter average. I additionally plotted the LS means of profit between genres below.
+
+
+```{r}
+lsmeans_genre_budget_vote <- lsmeans(lm(Movie_Table_4_genre$norm_profit~Movie_Table_4_genre$genres_clean + Movie_Table_4_genre$norm_budget + Movie_Table_4_genre$vote_average), pairwise~Movie_Table_4_genre$genres_clean, adjust = "none")
+
+
+##comparing the contrasts between each genre
+summary_lsmeans_genre_budget_vote <- summary(lsmeans_genre_budget_vote$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+summary_lsmeans_genre_budget_vote_lsmean <-summary(lsmeans_genre_budget_vote$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+
+
+
+ggplot(summary_lsmeans_genre_budget_vote_lsmean, aes(summary_lsmeans_genre_budget_vote_lsmean$`Movie_Table_4_genre$genres_clean`)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Genre", y = "LS Mean - Normalized Profit", title = "LS Mean Profit by Genre (Controlling for Budget and Vote Average)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(limits = c("Action"
+                          ,"Adventure"
+                          ,"Fantasy"
+                          ,"Animation"
+                          ,"Science Fiction"
+                          ,"Drama"
+                          ,"Thriller"
+                          ,"Family"
+                          ,"Comedy"
+                          ,"Romance"
+                          ,"Crime"
+                          ,"Horror"))
+
+
+
+```
+
+
+
+As can be seen, Family and Adventure movies have the highest LS mean for normalized profit (when controlling for budget and voter average)
+
+
+I additionally reconducted the same type of one-way ANCOVA testing for evaluating the impact of genre on voter rating.
+
+First, I used the F-test again to determine whether there was a statistical difference in voter rating across all genres.
+
+```{r}
+anova_genre_budget_vote2 <-Anova(lm(Movie_Table_4_genre$vote_average~Movie_Table_4_genre$genres_clean + Movie_Table_4_genre$norm_budget), type = 3)
+
+qf(.95, df1 = 11, df2 = 2561)
+```
+
+
+Then, I calculated the LS means for voter rating by each genre of interest when controlling for budget. Once again, Drama and Adventure movies seemed to be the most successful.
+
+```{r}
+lsmeans_genre_budget_vote2 <- lsmeans(lm(Movie_Table_4_genre$vote_average~Movie_Table_4_genre$genres_clean + Movie_Table_4_genre$norm_budget), pairwise~Movie_Table_4_genre$genres_clean, adjust = "none")
+
+
+##comparing the contrasts between each genre
+summary_lsmeans_genre_budget_vote2 <- summary(lsmeans_genre_budget_vote2$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+summary_lsmeans_genre_budget_vote_lsmean2 <-summary(lsmeans_genre_budget_vote2$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+
+
+
+ggplot(summary_lsmeans_genre_budget_vote_lsmean2, aes(summary_lsmeans_genre_budget_vote_lsmean2$`Movie_Table_4_genre$genres_clean`)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Genre", y = "LS Mean - Voter Rating", title = "LS Mean Profit by Genre (Controlling for Budget)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(limits = c("Action"
+                          ,"Adventure"
+                          ,"Fantasy"
+                          ,"Animation"
+                          ,"Science Fiction"
+                          ,"Drama"
+                          ,"Thriller"
+                          ,"Family"
+                          ,"Comedy"
+                          ,"Romance"
+                          ,"Crime"
+                          ,"Horror"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+###Two-Way ANCOVA Testing with Genre and Release Month Combined
+
+
+
+
+Now that I've determined genre to be a statistically significant variable that impacts normalized profit and voter rating, I decided to include it in the ANOVA testing I had previously done for move release month.
+
+To simplify my analysis, I chose to only focus on comparing two different months at a time for only two genres. I expect that the determined significance of impact for release month and genre on profit and voter rating to be of different magnitude with this smaller data subset.
+
+```{r}
+Movie_Table_4_genre_month_specific <- filter(Movie_Table_4, genres_clean == 'Drama' & release_month == "August"| genres_clean == 'Drama' & release_month == "September"| genres_clean == 'Comedy' & release_month == "August" | genres_clean == 'Comedy' & release_month == "September")
+
+Movie_Table_4_genre_month_specific <- droplevels(Movie_Table_4_genre_month_specific)
+```
+
+
+As a first step, I performed a global F-test on a two-way ANCOVA that includes the genre and release month categorical variables.
+
+
+```{r}
+anova_two_way_profit <- Anova(lm(Movie_Table_4_genre_month_specific$norm_profit~Movie_Table_4_genre_month_specific$release_month + Movie_Table_4_genre_month_specific$genres_clean + Movie_Table_4_genre_month_specific$norm_budget), type = 3)
+
+anova_two_way_vote <- Anova(lm(Movie_Table_4_genre_month_specific$vote_average~Movie_Table_4_genre_month_specific$release_month + Movie_Table_4_genre_month_specific$genres_clean + Movie_Table_4_genre_month_specific$norm_budget), type = 3)
+```
+
+It turns out that when release month, genre, and budget are combined in a model, genre and release month do not have a significant impact on the difference in expected profit means. Budget was by far the major driving factor in differing profits for August and September. 
+
+Meanwhile, it turns out that genre and release month together would have a significant impact on the different expected means for voter rating. Budget was not a big factor for these. As a reminder, these conclusions are only applicable to subsetted data that is limited to movies released in August and September and with the genres of comedy or drama.
+
+
+
+
+Before it is safe to infer conclusions from this Two-way ANCOVA model, it is also important to test for any interaction between the two categorical variables release month and genre. Interaction helps determine whether the impact of one categorical variable has a consistently positive or negative impact on the other across all groups of the other categorical variable.
+
+
+```{r}
+
+interaction.plot(Movie_Table_4_genre_month_specific$release_month, Movie_Table_4_genre_month_specific$genres_clean, Movie_Table_4_genre_month_specific$vote_average, col = 1:2, trace.label = "Genre", xlab = "Month", ylab = "Normalized Profit", title = "Interaction Plot for Profit, Genre, and Release Month") 
+
+
+
+model_genre_month <- lm(Movie_Table_4_genre_month_specific$vote_average ~ Movie_Table_4_genre_month_specific$genres_clean + Movie_Table_4_genre_month_specific$release_month + Movie_Table_4_genre_month_specific$genres_clean*Movie_Table_4_genre_month_specific$release_month)
+
+interaction <- summary(model_genre_month)
+
+```
+
+The interaction plot above shows that there appears to be very little interaction between the genre and release month variables - the two regression lines are almost parallel. If the two lines had very different slopes or intersected, it would imply the effect of genre would not be consistent across August and September. When formally testing for this interaction above, it returned an insignificant p-value (> 0.05). Given this lack of interaction, both the genre and release month variables are safe to include in a two-way ANCOVA model. The resulting LS Means plot is shown below.
+
+
+
+
+```{r}
+lsmeans_genre_budget_release_month2 <- lsmeans(lm(Movie_Table_4_genre_month_specific$vote_average~Movie_Table_4_genre_month_specific$genres_clean + Movie_Table_4_genre_month_specific$norm_budget + Movie_Table_4_genre_month_specific$release_month), pairwise~Movie_Table_4_genre_month_specific$release_month, adjust = "none")
+
+
+##comparing the contrasts between each genre
+summary_lsmeans_genre_budget_release_month2 <- summary(lsmeans_genre_budget_release_month2$contrasts)
+#summary_lsmeans_month_budget_vote[order(summary_lsmeans_month_budget_vote$estimate), ]
+
+##ls means by month
+lsmeans_genre_budget_release_month2_lsmeans2 <-summary(lsmeans_genre_budget_release_month2$lsmeans)
+#sorted
+#summary_lsmeans_month_budget_vote_lsmean[order(summary_lsmeans_month__budget_vote_lsmean$lsmean), ]
+
+
+
+
+
+ggplot(lsmeans_genre_budget_release_month2_lsmeans2, aes(lsmeans_genre_budget_release_month2_lsmeans2$`Movie_Table_4_genre_month_specific$release_month`)) +
+  geom_line(aes(y = lsmean, group = 1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  geom_point(aes(y = lsmean), size = 3, shape = 21, fill = "blue") +
+  labs(x = "Month", y = "LS Mean - Voter Rating", title = "LS Mean Voter Rating by Release Month (Controlling for Budget and Genre)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(limits = c("August",
+                              "September"))
+```
+
+
+
+
+
+
+
+
+
+
+
