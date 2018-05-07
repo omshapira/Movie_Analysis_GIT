@@ -223,6 +223,13 @@ Movie_Table2<-cbind(Movie_Table, norm_budget, norm_revenue, norm_profit)
 # kable(head(Movie_Table2))
 ```
 
+
+
+For more in-depth analysis of the steps taken in data munging and configuration, see my other page that includes source code and additional commentary [here](https://cdn.rawgit.com/omshapira/Movie_Analysis_GIT/c6eca81b/Movie_Analysis_Code%2BObservations.html#data-munging-the-dirty-work)
+
+
+
+
 # ** Preliminary Data Visualizations and Analysis (The Fun Part)**
 
 The analysis and visualizations below are for preliminary interpretation of the data. The immediate intention was to spot any interesting trends when comparing a few variables at a time. As I was doing this, I also wanted to gauge whether the dataset should be filtered down at all to minimize outlier data points. Lastly, I was curious to see which variable(s) had the highest correlation to high profits and voter ratings.
@@ -657,8 +664,7 @@ summary_model_vote_average <- summary(model_vote_average)
 In conclusion, I was unable to find any type of linear regression model that would serve as a good predictor of normalized movie profit. Budget had the highest correlation of all variables, but was still not a very strong predictor. 
 
 
-For more in-depth analysis of how and which other linear regression models were tested, see my additional [page] (https://cdn.rawgit.com/omshapira/Movie-Analysis/a7abba15/Movie_Analysis_Code%2BObservations.html#linear-regression-modeling) with code and additional commentary.
-
+For more in-depth analysis of how and which other linear regression models were tested, see my other page that includes source code and additional commentary [here](https://cdn.rawgit.com/omshapira/Movie_Analysis_GIT/c6eca81b/Movie_Analysis_Code%2BObservations.html#linear-regression-modeling)
 
 
 
@@ -1147,6 +1153,7 @@ ggplot(lsmeans_genre_budget_release_month2_lsmeans2, aes(lsmeans_genre_budget_re
 
 
 
+For more in-depth analysis of how and which other ANOVA models were tested, see my other page that includes source code and additional commentary [here](https://cdn.rawgit.com/omshapira/Movie_Analysis_GIT/c6eca81b/Movie_Analysis_Code%2BObservations.html#anova-and-ancova-testing-for-movie-release-month-and-genre) 
 
 
 
